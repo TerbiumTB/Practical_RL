@@ -2,7 +2,7 @@
 # all credit goes to https://github.com/abhishekunique
 # (if I got the author right)
 import numpy as np
-from gym.utils import seeding
+from gymnasium.utils import seeding
 
 try:
     from graphviz import Digraph
@@ -28,7 +28,7 @@ class MDP:
 
         States and actions can be anything you can use as dict keys, but we recommend that you use strings or integers
 
-        Here's an example from MDP depicted on http://bit.ly/2jrNHNr
+        Here's an example from MDP§ depicted on http://bit.ly/2jrNHNr
         transition_probs = {
             's0': {
                 'a0': {'s0': 0.5, 's2': 0.5},
@@ -249,7 +249,7 @@ class FrozenLakeEnv(MDP):
         print('\n'.join(map(''.join, desc_copy)), end='\n\n')
 
 
-def plot_graph(mdp, s_node_size='1,5',
+def plot_graph(mdp, s_node_size='0,75',
                a_node_size='0,5', rankdir='LR', ):
     """
     Function for pretty drawing MDP graph with graphviz library.
