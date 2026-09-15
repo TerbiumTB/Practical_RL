@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Protocol
+import numpy as np
 
 
 class ComputeTdLossProtocol(Protocol):
@@ -212,3 +213,60 @@ def test_compute_td_loss_double(compute_td_loss: ComputeTdLossProtocol):
         ).item()
         abs_diff = abs(ans - sample["answer"])
         assert abs_diff < 1e-8, abs_diff
+
+def compute_td_loss(states, actions, rewards, next_states, is_done,
+                    agent, target_network,
+                    gamma=0.99,
+                    check_shapes=False,
+                    device="cpu"):
+    """ Compute td loss using torch operations only. Use the formulae above. """
+    states = torch.tensor(states, device=device, dtype=torch.float32)    # shape: [batch_size, *state_shape]
+    actions = torch.tensor(actions, device=device, dtype=torch.int64)    # shape: [batch_size]
+    rewards = torch.tensor(rewards, device=device, dtype=torch.float32)  # shape: [batch_size]
+    # shape: [batch_size, *state_shape]
+    next_states = torch.tensor(next_states, device=device, dtype=torch.float)
+    is_done = torch.tensor(
+        is_done,
+        device=device,
+        dtype=torch.float32,
+    )  # shape: [batch_size]
+    is_not_done = 1 - is_done
+
+    # get q-values for all actions in current states
+    predicted_qvalues = agent(states)  # shape: [batch_size, n_actions]
+
+    # compute q-values for all actions in next states
+    # with torch.no_grad():
+    predicted_next_qvalues = target_network(next_states)  # shape: [batch_size, n_actions]
+    # print(predicted_next_qvalues)
+
+    # select q-values for chosen actions
+    predicted_qvalues_for_actions = predicted_qvalues[range(len(actions)), actions]  # shape: [batch_size]
+
+    # compute V*(next_states) using predicted next q-values
+    
+    next_state_values = predicted_next_qvalues.max(dim=-1).values
+
+    assert next_state_values.dim() == 1 and next_state_values.shape[0] == states.shape[0], \
+        "must predict one value per state"
+
+    # compute "target q-values" for loss - it's what's inside square parentheses in the above formula.
+    # at the last state use the simplified formula: Q(s,a) = r(s,a) since s' doesn't exist
+    # you can multiply next state values by is_not_done to achieve this.
+    target_qvalues_for_actions = rewards + gamma * is_not_done * next_state_values 
+
+    # mean squared error loss to minimize
+    loss = torch.mean((predicted_qvalues_for_actions - target_qvalues_for_actions.detach()) ** 2)
+
+    if check_shapes:
+        assert predicted_next_qvalues.data.dim() == 2, \
+            "make sure you predicted q-values for all actions in next state"
+        assert next_state_values.data.dim() == 1, \
+            "make sure you computed V(s') as maximum over just the actions axis and not all axes"
+        assert target_qvalues_for_actions.data.dim() == 1, \
+            "there's something wrong with target q-values, they must be a vector"
+
+    return loss
+
+if __name__ == "__main__":
+    print(test_compute_td_loss_vanilla(compute_td_loss))
