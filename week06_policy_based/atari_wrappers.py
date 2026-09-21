@@ -1,18 +1,33 @@
 """ Environment wrappers. """
 from collections import defaultdict, deque
 
+import ale_py
 import cv2
 import gymnasium as gym
 import numpy as np
+from ale_py import AtariEnv
 from gymnasium import ObservationWrapper, RewardWrapper, Wrapper
 from gymnasium.spaces import Box
-from gymnasium.wrappers import RecordVideo
-from shimmy.atari_env import AtariEnv
 from tensorboardX import SummaryWriter
 
-from env_batch import ParallelEnvBatch
+if __package__:
+    from .env_batch import ParallelEnvBatch
+else:
+    from env_batch import ParallelEnvBatch
 
+gym.register_envs(ale_py)
 cv2.ocl.setUseOpenCL(False)
+
+
+def _require_raw_atari_frames(env, wrapper_name):
+    """Ensure that frame skipping is performed only by our SkipFrames wrapper."""
+    if isinstance(env.unwrapped, AtariEnv):
+        frameskip = env.unwrapped._frameskip
+        if frameskip != 1:
+            raise ValueError(
+                f"{wrapper_name} requires the base Atari environment to use "
+                f"frameskip=1, but it uses frameskip={frameskip!r}"
+            )
 
 
 class EpisodicLife(Wrapper):
@@ -142,8 +157,7 @@ class MaxBetweenFrames(ObservationWrapper):
     """Takes maximum between two subsequent frames."""
 
     def __init__(self, env):
-        if isinstance(env.unwrapped, AtariEnv) and "NoFrameskip" not in env.spec.id:
-            raise ValueError("MaxBetweenFrames requires NoFrameskip in atari env id")
+        _require_raw_atari_frames(env, type(self).__name__)
         super().__init__(env)
         self.last_obs = None
 
@@ -193,8 +207,7 @@ class SkipFrames(Wrapper):
 
     def __init__(self, env, nskip=4):
         super().__init__(env)
-        if isinstance(env.unwrapped, AtariEnv) and "NoFrameskip" not in env.spec.id:
-            raise ValueError("SkipFrames requires NoFrameskip in atari env id")
+        _require_raw_atari_frames(env, type(self).__name__)
         self.nskip = nskip
 
     def step(self, action):
@@ -377,9 +390,13 @@ class _thunk:
 
 
 def nature_dqn_env(env_id, nenvs=None, seed=None, summaries="Numpy", clip_reward=True):
-    """Wraps env as in Nature DQN paper."""
-    if "NoFrameskip" not in env_id:
-        raise ValueError(f"env_id must have 'NoFrameskip' but is {env_id}")
+    """Wrap an Atari environment as in the Nature DQN paper.
+
+    Both modern IDs such as ``ALE/SpaceInvaders-v5`` and legacy IDs such as
+    ``SpaceInvadersNoFrameskip-v4`` are supported by current ale-py versions.
+    The base environment always emits every emulator frame; SkipFrames below
+    is solely responsible for repeating actions and skipping frames.
+    """
     if nenvs is not None:
         if seed is None:
             seed = list(range(nenvs))
@@ -401,7 +418,12 @@ def nature_dqn_env(env_id, nenvs=None, seed=None, summaries="Numpy", clip_reward
             env = ClipReward(env)
         return env
 
-    env = gym.make(env_id, render_mode="rgb_array")
+    env = gym.make(
+        env_id,
+        render_mode="rgb_array",
+        frameskip=1,
+        repeat_action_probability=0.0,
+    )
     if summaries:
         env = TensorboardSummaries(env)
     env = EpisodicLife(env)
