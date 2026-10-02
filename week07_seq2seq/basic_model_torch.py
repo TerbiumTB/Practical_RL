@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +22,10 @@ class BasicTranslationModel(nn.Module):
         self.dec_start = nn.Linear(hid_size, hid_size)
         self.dec0 = nn.GRUCell(emb_size, hid_size)
         self.logits = nn.Linear(hid_size, len(out_voc))
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     def encode(self, inp, **flags):
         """
@@ -65,12 +71,11 @@ class BasicTranslationModel(nn.Module):
         In other words, logp are probabilities of __current__ output at each tick, not the next one
         therefore you can get likelihood as logprobas * tf.one_hot(out,n_tokens)
         """
-        device = next(self.parameters()).device
         batch_size = inp.shape[0]
         bos = torch.tensor(
             [self.out_voc.bos_ix] * batch_size,
             dtype=torch.long,
-            device=device,
+            device=self.device,
         )
         logits_seq = [torch.log(to_one_hot(bos, len(self.out_voc)) + eps)]
 
@@ -92,7 +97,7 @@ class BasicTranslationModel(nn.Module):
         :return: output tokens int32[batch,time] and
                  log-probabilities of all tokens at each tick, [batch,time,n_tokens]
         """
-        device = next(self.parameters()).device
+        device = self.device
         batch_size = inp.shape[0]
         bos = torch.tensor(
             [self.out_voc.bos_ix] * batch_size,
@@ -110,7 +115,7 @@ class BasicTranslationModel(nn.Module):
                 _, y_t = torch.max(logits, dim=-1)
             else:
                 probs = F.softmax(logits, dim=-1)
-                y_t = torch.multinomial(probs, 1)[:, 0]
+                y_t = probs.multinomial(1)[:, 0]
 
             logits_seq.append(logits)
             out_seq.append(y_t)
@@ -125,6 +130,101 @@ class BasicTranslationModel(nn.Module):
             torch.stack(out_seq, 1),
             F.log_softmax(torch.stack(logits_seq, 1), dim=-1),
         )
+
+
+class SimpleBERTranslationModel(BasicTranslationModel):
+    def __init__(self, inp_voc, out_voc,
+                 emb_size, hid_size,):
+        nn.Module.__init__(self)
+        self.inp_voc = inp_voc
+        self.out_voc = out_voc
+
+        self.emb_inp = nn.Embedding(len(inp_voc), emb_size)
+        self.emb_out = nn.Embedding(len(out_voc), emb_size)
+        self.inp_projection = nn.Linear(emb_size, hid_size)
+        self.out_projection = nn.Linear(emb_size, hid_size)
+        self.enc0 = nn.TransformerEncoderLayer(hid_size,
+                                               1,
+                                               dim_feedforward=hid_size * 4,
+                                               dropout=0,
+                                               batch_first=True,
+                                               )
+        self.dec0 = nn.TransformerDecoderLayer(hid_size,
+                                               1,
+                                               dim_feedforward=hid_size * 4,
+                                               dropout=0,
+                                               batch_first=True,
+                                               )
+        self.logits = nn.Linear(hid_size, len(out_voc))
+
+    def add_positions(self, sequence):
+        length = sequence.shape[1]
+        size = sequence.shape[2]
+        positions = torch.arange(
+            length,
+            dtype=sequence.dtype,
+            device=sequence.device,
+        )[:, None]
+        frequencies = torch.exp(
+            torch.arange(
+                0,
+                size,
+                2,
+                dtype=sequence.dtype,
+                device=sequence.device,
+            ) * (-math.log(10000.0) / size)
+        )
+        encoding = torch.zeros_like(sequence)
+        encoding[:, :, 0::2] = torch.sin(positions * frequencies)
+        encoding[:, :, 1::2] = torch.cos(
+            positions * frequencies[:size // 2]
+        )
+        return sequence + encoding
+
+    def encode(self, inp, **flags):
+        inp_mask = infer_mask(
+            inp,
+            self.inp_voc.eos_ix,
+            dtype=torch.bool,
+        )
+        inp_emb = self.add_positions(
+            self.inp_projection(self.emb_inp(inp))
+        )
+        enc_seq = self.enc0(
+            inp_emb,
+            src_key_padding_mask=~inp_mask,
+        )
+        out = torch.empty(
+            (inp.shape[0], 0),
+            dtype=inp.dtype,
+            device=inp.device,
+        )
+        return [enc_seq, ~inp_mask, out]
+
+    def decode(self, prev_state, prev_tokens, **flags):
+        enc_seq, inp_padding_mask, out = prev_state
+        out = torch.cat((out, prev_tokens[:, None]), dim=1)
+        out_emb = self.add_positions(
+            self.out_projection(self.emb_out(out))
+        )
+        causal_mask = torch.triu(
+            torch.ones(
+                out.shape[1],
+                out.shape[1],
+                dtype=torch.bool,
+                device=out.device,
+            ),
+            diagonal=1,
+        )
+        dec_seq = self.dec0(
+            out_emb,
+            enc_seq,
+            tgt_mask=causal_mask,
+            memory_key_padding_mask=inp_padding_mask,
+        )
+        output_logits = self.logits(dec_seq[:, -1])
+
+        return [enc_seq, inp_padding_mask, out], output_logits
 
 
 ### Utility functions ###
